@@ -535,6 +535,193 @@ module {
       };
       Buffer.toArray(buf);
     };
+
+  // Async Implementation
+    type HttpAsyncFunction = (Request) -> async Response;
+
+    var asyncGetRequests = HashMap.StableHashMap<Text, HttpAsyncFunction>(0, Text.equal, Text.hash);
+    var asyncPostRequests = HashMap.StableHashMap<Text, HttpAsyncFunction>(0, Text.equal, Text.hash);
+    var asyncPutRequests = HashMap.StableHashMap<Text, HttpAsyncFunction>(0, Text.equal, Text.hash);
+    var asyncDeleteRequests = HashMap.StableHashMap<Text, HttpAsyncFunction>(0, Text.equal, Text.hash);
+
+    public func registerAsyncRequest(method : Text, url : Text, function : HttpAsyncFunction) {
+      switch (method) {
+        case "GET" {
+          asyncGetRequests.put(url, function);
+        };
+        case "POST" {
+          asyncPostRequests.put(url, function);
+        };
+        case "PUT" {
+          asyncPutRequests.put(url, function);
+        };
+        case "DELETE" {
+          asyncDeleteRequests.put(url, function);
+        };
+        case _ {
+          Debug.print("Unknown method: " # method);
+        };
+      };
+    };
+
+    private func registerAsyncRequestWithHandler(method : Text, path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      if (method == "GET") {
+        registerAsyncRequest(
+          method,
+          path,
+          func(request : Request) : async Response {
+            var response = await handler(
+              request,
+              ResponseClass(
+                func(res : BasicResponse) : Response {
+                  return {
+                    status_code = res.status_code;
+                    headers = res.headers;
+                    body = res.body;
+                    streaming_strategy = res.streaming_strategy;
+                    cache_strategy = #default;
+                  };
+                },
+                ? #default,
+              ),
+            );
+            return response;
+          },
+        );
+      } else {
+        registerAsyncRequest(
+          method,
+          path,
+          func(request : Request) : async Response {
+            var response = await handler(
+              request,
+              ResponseClass(
+                func(res : BasicResponse) : Response {
+                  return {
+                    status_code = res.status_code;
+                    headers = res.headers;
+                    body = res.body;
+                    streaming_strategy = res.streaming_strategy;
+                    cache_strategy = #noCache;
+                  };
+                },
+                ? #noCache,
+              ),
+            );
+            return response;
+          },
+        );
+      };
+    };
+
+    public func getAsync(path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      registerAsyncRequestWithHandler("GET", path, handler);
+    };
+
+    private func process_async_request(req : Request) : async Response {
+      Debug.print("Processing request: " # debug_show req.url.original);
+      Debug.print("Method: " # req.method);
+      Debug.print("Path: " # req.url.path.original);
+      switch (req.method) {
+        case "GET" {
+          switch (asyncGetRequests.get(req.url.path.original)) {
+            case (?getFunction) {
+              Debug.print("Found GET function");
+              let response = await getFunction(req);
+              return response;
+            };
+            case null {
+              staticFallback(req);
+            };
+          };
+        };
+        case "POST" {
+          switch (asyncPostRequests.get(req.url.path.original)) {
+            case (?postFunction) {
+              Debug.print("Found POST function");
+              let response = await postFunction(req);
+              return response;
+            };
+            case null {
+              Debug.print("No POST function found");
+              missingResponse;
+            };
+          };
+        };
+        case "PUT" {
+          switch (asyncPutRequests.get(req.url.path.original)) {
+            case (?putFunction) {
+              Debug.print("Found PUT function");
+              let response = await putFunction(req);
+              return response;
+            };
+            case null {
+              Debug.print("No PUT function found");
+              missingResponse;
+            };
+          };
+        };
+        case "DELETE" {
+          switch (asyncDeleteRequests.get(req.url.path.original)) {
+            case (?deleteFunction) {
+              Debug.print("Found DELETE function");
+              let response = await deleteFunction(req);
+              return response;
+            };
+            case null {
+              Debug.print("No DELETE function found");
+              missingResponse;
+            };
+          };
+        };
+        case _ {
+          missingResponse;
+        };
+      };
+    };
+
+    public func http_request_async(request : HttpRequest) : async HttpResponse {
+      // Application logic to process the request
+      let req = HttpParser.parse(request);
+      var cachedResponse = cache.get(request);
+      switch cachedResponse {
+        case (?response) {
+          {
+            status_code = response.status_code;
+            headers = joinArrays(response.headers, [cache.certificationHeader(request)]);
+            body = response.body;
+            streaming_strategy = response.streaming_strategy;
+            upgrade = null;
+          };
+        };
+        case null {
+            let response = await process_async_request(req);
+            let formattedResponse = {
+                status_code = response.status_code;
+                headers = response.headers;
+                body = response.body;
+                streaming_strategy = response.streaming_strategy;
+                upgrade = null;
+            };
+
+            // expiry can be null to use the default expiry
+            if (response.status_code == 200) {
+                switch (response.cache_strategy) {
+                case (#expireAfter expiry) {
+                    cache.put(request, formattedResponse, ?expiry.nanoseconds);
+                };
+                case (#noCache) {
+                    // do not cache
+                };
+                case (#default) {
+                    cache.put(request, formattedResponse, null);
+                };
+                };
+            };
+            return formattedResponse;
+        };
+      };
+    };
   };
 
   public class ResponseClass(cb : (Response) -> Response, overrideCacheStrategy : ?CacheStrategy) {
