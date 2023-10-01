@@ -54,6 +54,11 @@ module {
 
   // Private Types
   type HttpFunction = (Request) -> Response;
+  type HttpAsyncFunction = (Request) -> async Response;
+  type HttpFunctionEnum = {
+    #synchronous: HttpFunction;
+    #asynchronous: HttpAsyncFunction;
+  };
   type RequestMap = HashMap.StableHashMap<Text, HttpFunction>;
 
   type CacheStrategy = {
@@ -121,15 +126,15 @@ module {
     });
 
     // #region Internals
-    var getRequests = HashMap.StableHashMap<Text, HttpFunction>(0, Text.equal, Text.hash);
+    var getRequests = HashMap.StableHashMap<Text, HttpFunctionEnum>(0, Text.equal, Text.hash);
 
-    var postRequests = HashMap.StableHashMap<Text, HttpFunction>(0, Text.equal, Text.hash);
+    var postRequests = HashMap.StableHashMap<Text, HttpFunctionEnum>(0, Text.equal, Text.hash);
 
-    var putRequests = HashMap.StableHashMap<Text, HttpFunction>(0, Text.equal, Text.hash);
+    var putRequests = HashMap.StableHashMap<Text, HttpFunctionEnum>(0, Text.equal, Text.hash);
 
-    var deleteRequests = HashMap.StableHashMap<Text, HttpFunction>(0, Text.equal, Text.hash);
+    var deleteRequests = HashMap.StableHashMap<Text, HttpFunctionEnum>(0, Text.equal, Text.hash);
 
-    private func process_request(req : Request) : Response {
+    private func process_request(req : Request) : async Response {
       Debug.print("Processing request: " # debug_show req.url.original);
       Debug.print("Method: " # req.method);
       Debug.print("Path: " # req.url.path.original);
@@ -138,7 +143,13 @@ module {
           switch (getRequests.get(req.url.path.original)) {
             case (?getFunction) {
               Debug.print("Found GET function");
-              getFunction(req);
+              switch(getFunction) {
+                case(#synchronous syncGetFunction) { syncGetFunction(req); };
+                case(#asynchronous asyncGetFunction) {
+                  let response = await asyncGetFunction(req);
+                  return response;
+                };
+              };
             };
             case null {
               staticFallback(req);
@@ -149,7 +160,13 @@ module {
           switch (postRequests.get(req.url.path.original)) {
             case (?postFunction) {
               Debug.print("Found POST function");
-              postFunction(req);
+              switch(postFunction) {
+                case(#synchronous syncPostFunction) { syncPostFunction(req); };
+                case(#asynchronous asyncPostFunction) {
+                  let response = await asyncPostFunction(req);
+                  return response;
+                };
+              };
             };
             case null {
               Debug.print("No POST function found");
@@ -161,7 +178,13 @@ module {
           switch (putRequests.get(req.url.path.original)) {
             case (?putFunction) {
               Debug.print("Found PUT function");
-              putFunction(req);
+              switch(putFunction) {
+                case(#synchronous syncPutFunction) { syncPutFunction(req); };
+                case(#asynchronous asyncPutFunction) {
+                  let response = await asyncPutFunction(req);
+                  return response;
+                };
+              };
             };
             case null {
               Debug.print("No PUT function found");
@@ -173,7 +196,13 @@ module {
           switch (deleteRequests.get(req.url.path.original)) {
             case (?deleteFunction) {
               Debug.print("Found DELETE function");
-              deleteFunction(req);
+              switch(deleteFunction) {
+                case(#synchronous syncDeleteFunction) { syncDeleteFunction(req); };
+                case(#asynchronous asyncDeleteFunction) {
+                  let response = await asyncDeleteFunction(req);
+                  return response;
+                };
+              };
             };
             case null {
               Debug.print("No DELETE function found");
@@ -250,7 +279,7 @@ module {
     };
 
     // Insert request handlers into maps based on method
-    public func registerRequest(method : Text, url : Text, function : HttpFunction) {
+    public func registerRequest(method : Text, url : Text, function : HttpFunctionEnum) {
       switch (method) {
         case "GET" {
           getRequests.put(url, function);
@@ -272,70 +301,146 @@ module {
     // Register a request handler that will be cached
     // GET requests are cached by default
     // POST, PUT, DELETE requests are not cached
-    private func registerRequestWithHandler(method : Text, path : Text, handler : (request : Request, response : ResponseClass) -> Response) {
+    type RequestHandlerEnum = {
+      #synchronous: (request : Request, response : ResponseClass) -> Response;
+      #asynchronous: (request : Request, response : ResponseClass) -> async Response;
+    };
+    private func registerRequestWithHandler(method : Text, path : Text, handler : RequestHandlerEnum) {
       if (method == "GET") {
-        registerRequest(
-          method,
-          path,
-          func(request : Request) : Response {
-            var response = handler(
-              request,
-              ResponseClass(
-                func(res : BasicResponse) : Response {
-                  return {
-                    status_code = res.status_code;
-                    headers = res.headers;
-                    body = res.body;
-                    streaming_strategy = res.streaming_strategy;
-                    cache_strategy = #default;
-                  };
-                },
-                ? #default,
-              ),
+        switch(handler) {
+          case(#synchronous requestHandler) {
+            registerRequest(
+              method,
+              path,
+              #synchronous (func(request : Request) : Response {
+                var response = requestHandler(
+                  request,
+                  ResponseClass(
+                    func(res : BasicResponse) : Response {
+                      return {
+                        status_code = res.status_code;
+                        headers = res.headers;
+                        body = res.body;
+                        streaming_strategy = res.streaming_strategy;
+                        cache_strategy = #default;
+                      };
+                    },
+                    ? #default,
+                  ),
+                );
+                return response;
+              }),
             );
-            return response;
-          },
-        );
+          };
+          case(#asynchronous requestHandler) {
+            registerRequest(
+              method,
+              path,
+              #asynchronous (func(request : Request) : async Response {
+                var response = await requestHandler(
+                  request,
+                  ResponseClass(
+                    func(res : BasicResponse) : Response {
+                      return {
+                        status_code = res.status_code;
+                        headers = res.headers;
+                        body = res.body;
+                        streaming_strategy = res.streaming_strategy;
+                        cache_strategy = #default;
+                      };
+                    },
+                    ? #default,
+                  ),
+                );
+                return response;
+              }),
+            );
+          };
+        };
       } else {
-        registerRequest(
-          method,
-          path,
-          func(request : Request) : Response {
-            var response = handler(
-              request,
-              ResponseClass(
-                func(res : BasicResponse) : Response {
-                  return {
-                    status_code = res.status_code;
-                    headers = res.headers;
-                    body = res.body;
-                    streaming_strategy = res.streaming_strategy;
-                    cache_strategy = #noCache;
-                  };
-                },
-                ? #noCache,
-              ),
+        switch(handler) {
+          case(#synchronous requestHandler) {
+            registerRequest(
+              method,
+              path,
+              #synchronous (func(request : Request) : Response {
+                var response = requestHandler(
+                  request,
+                  ResponseClass(
+                    func(res : BasicResponse) : Response {
+                      return {
+                        status_code = res.status_code;
+                        headers = res.headers;
+                        body = res.body;
+                        streaming_strategy = res.streaming_strategy;
+                        cache_strategy = #noCache;
+                      };
+                    },
+                    ? #noCache,
+                  ),
+                );
+                return response;
+              }),
             );
-            return response;
-          },
-        );
+          };
+          case(#asynchronous requestHandler) {
+            registerRequest(
+              method,
+              path,
+              #asynchronous (func(request : Request) : async Response {
+                var response = await requestHandler(
+                  request,
+                  ResponseClass(
+                    func(res : BasicResponse) : Response {
+                      return {
+                        status_code = res.status_code;
+                        headers = res.headers;
+                        body = res.body;
+                        streaming_strategy = res.streaming_strategy;
+                        cache_strategy = #noCache;
+                      };
+                    },
+                    ? #noCache,
+                  ),
+                );
+                return response;
+              }),
+            );
+          };
+        };
       };
     };
 
     public func get(path : Text, handler : (request : Request, response : ResponseClass) -> Response) {
-      registerRequestWithHandler("GET", path, handler);
+      registerRequestWithHandler("GET", path, #synchronous(handler));
+    };
+
+    public func getAsync(path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      registerRequestWithHandler("GET", path, #asynchronous(handler));
     };
 
     public func post(path : Text, handler : (request : Request, response : ResponseClass) -> Response) {
-      registerRequestWithHandler("POST", path, handler);
+      registerRequestWithHandler("POST", path, #synchronous(handler));
+    };
+
+    public func postAsync(path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      registerRequestWithHandler("POST", path, #asynchronous(handler));
     };
 
     public func put(path : Text, handler : (request : Request, response : ResponseClass) -> Response) {
-      registerRequestWithHandler("PUT", path, handler);
+      registerRequestWithHandler("PUT", path, #synchronous(handler));
+    };
+
+    public func putAsync(path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      registerRequestWithHandler("PUT", path, #asynchronous(handler));
     };
 
     public func delete(path : Text, handler : (request : Request, response : ResponseClass) -> Response) {
-      registerRequestWithHandler("DELETE", path, handler);
+      registerRequestWithHandler("DELETE", path, #synchronous(handler));
+    };
+
+    public func deleteAsync(path : Text, handler : (request : Request, response : ResponseClass) -> async Response) {
+      registerRequestWithHandler("DELETE", path, #asynchronous(handler));
     };
 
     public func entries() : SerializedEntries {
@@ -414,10 +519,10 @@ module {
       };
     };
 
-    public func http_request_update(request : HttpRequest) : HttpResponse {
+    public func http_request_update(request : HttpRequest) : async HttpResponse {
       // Application logic to process the request
       let req = HttpParser.parse(request);
-      let response = process_request(req);
+      let response = await process_request(req);
       let formattedResponse = {
         status_code = response.status_code;
         headers = response.headers;
